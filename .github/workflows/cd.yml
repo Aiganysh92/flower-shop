@@ -1,0 +1,79 @@
+# CD = Continuous Delivery.
+# This workflow runs automatically on GitHub after a Pull Request is merged into main
+# (a merge is a "push" to main). It builds the Docker images and pushes them to Amazon ECR.
+# It does NOT deploy the images anywhere (no EC2, no EKS, no Kubernetes).
+name: CD
+
+on:
+  push:
+    branches: [main]
+
+# id-token: write lets GitHub create an OIDC token, which AWS trusts instead of access keys.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  # Values come from GitHub "Variables" (Settings > Secrets and variables > Actions > Variables).
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  BACKEND_REPOSITORY: ${{ vars.ECR_BACKEND_REPOSITORY }}
+  FRONTEND_REPOSITORY: ${{ vars.ECR_FRONTEND_REPOSITORY }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  cd:
+    name: Push images to Amazon ECR
+    runs-on: ubuntu-latest
+
+    steps:
+      # Download the repository code onto the GitHub runner.
+      - name: 1. Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Log in to AWS without stored passwords: GitHub sends an OIDC token,
+      # and AWS gives back short-lived credentials for the IAM role in the AWS_ROLE_ARN secret.
+      - name: 2. Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Log Docker in to the ECR registry so it can push images.
+      # The registry address (ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com) is saved as an output.
+      - name: 3. Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      # Build both images with simple local names.
+      - name: 4. Build Docker images
+        run: |
+          docker build -t flower-shop-backend ./backend
+          docker build -t flower-shop-frontend ./frontend
+
+      # Give each image its full ECR name. The tag is the git commit SHA,
+      # so every image can be traced back to the exact commit it was built from.
+      - name: 5. Tag Docker images using commit SHA
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker tag flower-shop-backend  "$REGISTRY/$BACKEND_REPOSITORY:$IMAGE_TAG"
+          docker tag flower-shop-frontend "$REGISTRY/$FRONTEND_REPOSITORY:$IMAGE_TAG"
+
+      # Upload the images to the ECR repositories.
+      - name: 6. Push Docker images to ECR
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push "$REGISTRY/$BACKEND_REPOSITORY:$IMAGE_TAG"
+          docker push "$REGISTRY/$FRONTEND_REPOSITORY:$IMAGE_TAG"
+
+      # Print the final image addresses so they are easy to find in the logs.
+      - name: 7. Display image references in logs
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          echo "Backend image:  $REGISTRY/$BACKEND_REPOSITORY:$IMAGE_TAG"
+          echo "Frontend image: $REGISTRY/$FRONTEND_REPOSITORY:$IMAGE_TAG"
+          echo "### Pushed images" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`$REGISTRY/$BACKEND_REPOSITORY:$IMAGE_TAG\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`$REGISTRY/$FRONTEND_REPOSITORY:$IMAGE_TAG\`" >> "$GITHUB_STEP_SUMMARY"
