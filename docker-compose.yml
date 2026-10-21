@@ -1,0 +1,23 @@
+# Run the whole Flower Shop locally with one command:
+#   docker compose up --build
+# Then open http://localhost:5173
+
+services:
+  backend:
+    build: ./backend
+    image: flower-shop-backend:local
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    image: flower-shop-frontend:local
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

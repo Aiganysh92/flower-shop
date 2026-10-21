@@ -1,0 +1,96 @@
+# CI = Continuous Integration.
+# This workflow runs automatically on GitHub when a Pull Request targets main.
+# It checks that the code is tested, builds, is free of serious vulnerabilities
+# and passes the SonarQube Quality Gate. If any step fails, the PR shows a red X.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+# The workflow only needs to read the code.
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Test, build, scan
+    runs-on: ubuntu-latest
+
+    steps:
+      # Download the repository code onto the GitHub runner (a temporary virtual machine).
+      # fetch-depth: 0 downloads the full git history, which SonarQube uses to find new code.
+      - name: 1. Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Install Node.js 22 and cache downloaded npm packages to make later runs faster.
+      - name: 2. Setup Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      # "npm ci" installs the exact versions written in package-lock.json.
+      - name: 3. Install dependencies
+        run: |
+          npm ci --prefix backend
+          npm ci --prefix frontend
+
+      # Run the unit tests and create coverage reports (coverage/lcov.info) for SonarQube.
+      # The sed command adds the folder name to the file paths in each report,
+      # so SonarQube (which runs from the repository root) can find the files.
+      - name: 4. Run tests
+        run: |
+          npm run test:coverage --prefix backend
+          npm run test:coverage --prefix frontend
+          sed -i 's#^SF:#SF:backend/#' backend/coverage/lcov.info
+          sed -i 's#^SF:#SF:frontend/#' frontend/coverage/lcov.info
+
+      # Build the production version of the React app (frontend/dist).
+      - name: 5. Build application
+        run: npm run build --prefix frontend
+
+      # Build both Docker images on the runner. They are NOT pushed anywhere in CI.
+      - name: 6. Build Docker images
+        run: |
+          docker build -t flower-shop-backend:${{ github.sha }} ./backend
+          docker build -t flower-shop-frontend:${{ github.sha }} ./frontend
+
+      # Trivy looks for known security vulnerabilities (CVEs) in the images.
+      # The step fails if it finds a HIGH or CRITICAL vulnerability that already has a fix.
+      - name: 7a. Scan backend Docker image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: flower-shop-backend:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: 7b. Scan frontend Docker image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: flower-shop-frontend:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
+      # Send the code and coverage reports to the SonarQube server for analysis.
+      # Settings are in sonar-project.properties. The server URL and token come from GitHub secrets.
+      - name: 8. Run SonarQube analysis
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      # Wait for SonarQube to finish and fail the workflow if the Quality Gate is not passed.
+      - name: 9. Check SonarQube Quality Gate
+        uses: SonarSource/sonarqube-quality-gate-action@7a5fffe8e523c40e0c740b6bc2712ab503e52efa # v1.2.1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
